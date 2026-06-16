@@ -9,3 +9,5 @@ __pycache__/
 datasets/
 checkpoints/
 _tmp_adapters/
+venv/
+.gitignore
