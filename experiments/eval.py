@@ -13,6 +13,7 @@ from tqdm import trange
 from transformers import AutoTokenizer, GenerationConfig, AutoModelForCausalLM
 from EfficientRED.models import load_REDllama_model
 from safetensors.torch import load_file
+from datetime import datetime
 
 MATH_DATASETS = {"gsm8k", "mawps", "svamp"}
 
@@ -133,17 +134,23 @@ def main():
         correct, total = 0, 0
         for k in trange(0, len(instances), args.batch_size, disable=rank() != 0, desc=ds):
             batch = instances[k : k + args.batch_size]
-            prompts = [PROMPT_TEMPLATE.format(instruction=b["instruction"]) for b in batch]
+            # prompts = [PROMPT_TEMPLATE.format(instruction=b["instruction"]) for b in batch]
+            prompts = [f"{b['instruction']}\n" for b in batch]
             inputs = tokenizer(prompts, return_tensors="pt", padding=True)
             if torch.cuda.is_available():
                 inputs = {k: v.cuda() for k, v in inputs.items()}
 
             with torch.inference_mode():
                 out_ids = model.generate(**inputs, generation_config=gen_cfg)
-            responses = tokenizer.batch_decode(out_ids, skip_special_tokens=True)
+            # responses = tokenizer.batch_decode(out_ids, skip_special_tokens=True)
 
-            for resp, b in zip(responses, batch):
-                answer_text = resp.split("### Response:")[-1]
+            # for resp, b in zip(responses, batch):
+            prompt_len = inputs["input_ids"].shape[1]
+            generated_ids = out_ids[:, prompt_len:]
+            responses = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+
+            for answer_text, b in zip(responses, batch):
+                # answer_text = resp.split("### Response:")[-1]
                 pred = extract_answer(answer_text, ds)
                 if rank() == 0 and args.debug_samples > 0:
                     print(
@@ -176,8 +183,13 @@ def main():
             dir_path = args.model_name_or_path
         out_path = os.path.join(dir_path, "metrics.json")
         if os.path.isdir(dir_path):
-            with open(out_path, "w") as f:
-                json.dump(metrics, f, indent=2)
+            if os.path.isfile(out_path):
+                with open(out_path, "a") as f:
+                    f.write(f"\n\nLatest result as of {datetime.now()}")
+                    json.dump(metrics, f, indent=2)
+            else:
+                with open(out_path, "w") as f:
+                    json.dump(metrics, f, indent=2)
 
 
 if __name__ == "__main__":
