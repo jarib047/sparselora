@@ -3,16 +3,18 @@
 from ast import literal_eval
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 
 import torch
 import transformers
 from datasets import load_dataset
 from liger_kernel.transformers import apply_liger_kernel_to_llama
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser, set_seed
+from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser, set_seed, trainer_utils
 
 from sparselora import SparseLoRAConfig, apply_sparselora
 
+from EfficientRED.models import load_REDllama_model, ActivationLLama
 
 def _parse_val(v):
     try:
@@ -26,6 +28,7 @@ class ScriptArguments:
     model_name_or_path: str = field(metadata={"help": "HF model name or local path"})
     dataset: str = field(metadata={"help": "Path to training JSON file"})
     sparselora: str = field(metadata={"help": "Comma-separated key=value pairs, e.g. path=z-lab/...,mode=o1"})
+    peft: str = field(metadata={"help": "The PEFT to be applied"})
     max_seq_length: int = field(default=512)
     lora_r: int = field(default=32)
     lora_alpha: int = field(default=64)
@@ -50,10 +53,6 @@ def main():
     args, training_args = parser.parse_args_into_dataclasses()
     set_seed(training_args.seed)
 
-    config = SparseLoRAConfig.from_pretrained(
-        **{k: _parse_val(v) for k, v in (kv.split("=", 1) for kv in args.sparselora.split(","))}
-    )
-
     apply_liger_kernel_to_llama(
         rope=True,
         swiglu=False,
@@ -67,6 +66,7 @@ def main():
         attn_implementation="sdpa",
         torch_dtype=torch.bfloat16,
     )
+
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
         model_max_length=args.max_seq_length,
@@ -76,7 +76,10 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = get_peft_model(
+    if args.peft == "red":
+        model = ActivationLLama(model)
+    elif args.peft == "lora":
+        model = get_peft_model(
         model,
         LoraConfig(
             r=args.lora_r,
@@ -87,7 +90,22 @@ def main():
             task_type="CAUSAL_LM",
         ),
     )
-    model = apply_sparselora(model, config)
+    elif args.peft == "sparseLora":
+        config = SparseLoRAConfig.from_pretrained(
+            **{k: _parse_val(v) for k, v in (kv.split("=", 1) for kv in args.sparselora.split(","))}
+            )
+        model = get_peft_model(
+        model,
+        LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules=args.lora_target_modules.split(","),
+            bias="none",
+            task_type="CAUSAL_LM",
+        ),
+    )
+        model = apply_sparselora(model, config)
     model.print_trainable_parameters()
 
     train_dataset = load_dataset("json", data_files=args.dataset)["train"]
@@ -106,7 +124,8 @@ def main():
     )
     trainer.train()
     trainer.save_model()
-    config.save_pretrained(training_args.output_dir)
+    if args.peft == "sparseLora":
+        config.save_pretrained(training_args.output_dir)
 
 
 if __name__ == "__main__":

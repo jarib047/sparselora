@@ -10,7 +10,9 @@ from peft import AutoPeftModelForCausalLM
 from tabulate import tabulate
 from torch import distributed as dist
 from tqdm import trange
-from transformers import AutoTokenizer, GenerationConfig
+from transformers import AutoTokenizer, GenerationConfig, AutoModelForCausalLM
+from EfficientRED.models import load_REDllama_model
+from safetensors.torch import load_file
 
 MATH_DATASETS = {"gsm8k", "mawps", "svamp"}
 
@@ -63,6 +65,9 @@ def main():
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--max_new_tokens", type=int, default=32)
     parser.add_argument("--debug_samples", type=int, default=0)
+    parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
+    parser.add_argument("--red_path", required=False, default="")
+    parser.add_argument("--peft", required=False, default="not_red")
     args = parser.parse_args()
 
     distributed = "RANK" in os.environ
@@ -72,27 +77,50 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
 
-    model = AutoPeftModelForCausalLM.from_pretrained(
-        args.model_name_or_path,
-        attn_implementation="sdpa",
-        torch_dtype=torch.float16,
-        device_map="auto",
-    )
-    
-    model.generation_config.max_length = GenerationConfig().max_length  # default is usually 20
-    model.generation_config.max_new_tokens = None
-    
-    tokenizer = AutoTokenizer.from_pretrained(
-        model.peft_config["default"].base_model_name_or_path,
-        model_max_length=512,
-        padding_side="left",
-        use_fast=False,
-    )
+    dtype_map = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+
+    if args.peft == "red":
+        model = load_REDllama_model(args.model_name_or_path)
+        state_dict = load_file(args.red_path)
+        model.load_state_dict(state_dict)
+        model = model.to(local_rank) 
+        model.base_model.generation_config.max_length = GenerationConfig().max_length  # default is usually 20
+        model.base_model.generation_config.max_new_tokens = None
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_name_or_path,
+            model_max_length=512,
+            padding_side="left",
+            use_fast=False,
+        )
+
+    else:
+        model = AutoPeftModelForCausalLM.from_pretrained(
+            args.model_name_or_path,
+            attn_implementation="sdpa",
+            torch_dtype=dtype_map[args.dtype],
+            device_map="auto",
+        )
+        model.generation_config.max_length = GenerationConfig().max_length  # default is usually 20
+        model.generation_config.max_new_tokens = None
+        tokenizer = AutoTokenizer.from_pretrained(
+            model.peft_config["default"].base_model_name_or_path,
+            model_max_length=512,
+            padding_side="left",
+            use_fast=False,
+        )
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     gen_cfg = GenerationConfig(
         max_new_tokens=args.max_new_tokens,
+        do_sample=False,
+        renormalize_logits=True,
+        remove_invalid_values=True,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
@@ -106,12 +134,12 @@ def main():
         for k in trange(0, len(instances), args.batch_size, disable=rank() != 0, desc=ds):
             batch = instances[k : k + args.batch_size]
             prompts = [PROMPT_TEMPLATE.format(instruction=b["instruction"]) for b in batch]
-            input_ids = tokenizer(prompts, return_tensors="pt", padding=True).input_ids
+            inputs = tokenizer(prompts, return_tensors="pt", padding=True)
             if torch.cuda.is_available():
-                input_ids = input_ids.cuda()
+                inputs = {k: v.cuda() for k, v in inputs.items()}
 
             with torch.inference_mode():
-                out_ids = model.generate(input_ids, generation_config=gen_cfg)
+                out_ids = model.generate(**inputs, generation_config=gen_cfg)
             responses = tokenizer.batch_decode(out_ids, skip_special_tokens=True)
 
             for resp, b in zip(responses, batch):
@@ -142,8 +170,12 @@ def main():
 
     if rank() == 0:
         print(tabulate(metrics.items(), headers=["Dataset", "Accuracy"], tablefmt="simple_outline"))
-        out_path = os.path.join(args.model_name_or_path, "metrics.json")
-        if os.path.isdir(args.model_name_or_path):
+        if args.peft == "red":
+            dir_path = os.path.dirname(args.red_path)
+        else:
+            dir_path = args.model_name_or_path
+        out_path = os.path.join(dir_path, "metrics.json")
+        if os.path.isdir(dir_path):
             with open(out_path, "w") as f:
                 json.dump(metrics, f, indent=2)
 
