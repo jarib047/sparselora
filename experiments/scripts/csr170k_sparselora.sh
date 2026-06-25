@@ -25,11 +25,11 @@ PYTHONPATH=/home/bsilwal torchrun --nproc_per_node=gpu experiments/train.py \
     --save_strategy no \
     --report_to none \
     --ddp_find_unused_parameters false \
-    --peft sparseLora
+    --peft sparseLora \
+    --use_liger true
 
 PYTHONPATH=/home/bsilwal torchrun --nproc_per_node=gpu experiments/eval.py \
     --model_name_or_path checkpoints/csr170k_sparselora \
     --dataset boolq+piqa+social_i_qa+hellaswag+winogrande+arc-easy+arc-challenge+openbookqa
-
 
 

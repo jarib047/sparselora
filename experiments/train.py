@@ -3,18 +3,18 @@
 from ast import literal_eval
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path
+import json
 
 import torch
 import transformers
 from datasets import load_dataset
 from liger_kernel.transformers import apply_liger_kernel_to_llama
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser, set_seed, trainer_utils
+from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser, set_seed
 
 from sparselora import SparseLoRAConfig, apply_sparselora
 
-from EfficientRED.models import load_REDllama_model, ActivationLLama
+from EfficientRED.models import ActivationLLama
 
 def _parse_val(v):
     try:
@@ -34,6 +34,10 @@ class ScriptArguments:
     lora_alpha: int = field(default=64)
     lora_dropout: float = field(default=0.0)
     lora_target_modules: str = field(default="q_proj,k_proj,v_proj,o_proj")
+    use_liger: bool = field(
+        default=False,
+        metadata={"help": "Enable Liger kernels. Use only for SparseLoRA unless intentionally testing."},
+    )
 
 
 def tokenize_and_mask(tokenizer, max_len, data_point):
@@ -53,13 +57,14 @@ def main():
     args, training_args = parser.parse_args_into_dataclasses()
     set_seed(training_args.seed)
 
-    apply_liger_kernel_to_llama(
-        rope=True,
-        swiglu=False,
-        cross_entropy=True,
-        fused_linear_cross_entropy=False,
-        rms_norm=True,
-    )
+    if args.use_liger:
+        apply_liger_kernel_to_llama(
+            rope=True,
+            swiglu=False,
+            cross_entropy=True,
+            fused_linear_cross_entropy=False,
+            rms_norm=True,
+        )
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
@@ -126,6 +131,32 @@ def main():
     trainer.save_model()
     if args.peft == "sparseLora":
         config.save_pretrained(training_args.output_dir)
+    if trainer.is_world_process_zero():
+        with open(f"{training_args.output_dir}/run_config.json", "w") as f:
+            json.dump(
+                {
+                    "model_name_or_path": args.model_name_or_path,
+                    "dataset": args.dataset,
+                    "peft": args.peft,
+                    "sparselora": args.sparselora,
+                    "use_liger": args.use_liger,
+                    "max_seq_length": args.max_seq_length,
+                    "lora_r": args.lora_r,
+                    "lora_alpha": args.lora_alpha,
+                    "lora_dropout": args.lora_dropout,
+                    "lora_target_modules": args.lora_target_modules,
+                    "seed": training_args.seed,
+                    "learning_rate": training_args.learning_rate,
+                    "num_train_epochs": training_args.num_train_epochs,
+                    "per_device_train_batch_size": training_args.per_device_train_batch_size,
+                    "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
+                    "lr_scheduler_type": str(training_args.lr_scheduler_type),
+                    "warmup_ratio": training_args.warmup_ratio,
+                    "bf16": training_args.bf16,
+                },
+                f,
+                indent=2,
+            )
 
 
 if __name__ == "__main__":

@@ -150,7 +150,6 @@ def main():
             responses = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
 
             for answer_text, b in zip(responses, batch):
-                # answer_text = resp.split("### Response:")[-1]
                 pred = extract_answer(answer_text, ds)
                 if rank() == 0 and args.debug_samples > 0:
                     print(
@@ -189,7 +188,24 @@ def main():
                     json.dump(metrics, f, indent=2)
             else:
                 with open(out_path, "w") as f:
+                    f.write(f"\n\nLatest result as of {datetime.now()}")
                     json.dump(metrics, f, indent=2)
+            with open(os.path.join(dir_path, "eval_config.json"), "w") as f:
+                json.dump(
+                    {
+                        "model_name_or_path": args.model_name_or_path,
+                        "dataset": args.dataset,
+                        "batch_size": args.batch_size,
+                        "max_new_tokens": args.max_new_tokens,
+                        "dtype": args.dtype,
+                        "peft": args.peft,
+                        "red_path": args.red_path,
+                        "prompt_format": "instruction_newline",
+                        "decode_generated_tokens_only": True,
+                    },
+                    f,
+                    indent=2,
+                )
 
 
 if __name__ == "__main__":
