@@ -11,10 +11,10 @@ from datasets import load_dataset
 from liger_kernel.transformers import apply_liger_kernel_to_llama
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser, set_seed
-
 from sparselora import SparseLoRAConfig, apply_sparselora
 
 from EfficientRED.models import ActivationLLama
+from profile_runtime_breakdown import measure
 
 def _parse_val(v):
     try:
@@ -34,10 +34,7 @@ class ScriptArguments:
     lora_alpha: int = field(default=64)
     lora_dropout: float = field(default=0.0)
     lora_target_modules: str = field(default="q_proj,k_proj,v_proj,o_proj")
-    use_liger: bool = field(
-        default=False,
-        metadata={"help": "Enable Liger kernels. Use only for SparseLoRA unless intentionally testing."},
-    )
+    measure_latency: bool = field(default=False)
 
 
 def tokenize_and_mask(tokenizer, max_len, data_point):
@@ -57,7 +54,11 @@ def main():
     args, training_args = parser.parse_args_into_dataclasses()
     set_seed(training_args.seed)
 
-    if args.use_liger:
+    if args.measure_latency:
+        measure(args, training_args)
+        exit()
+
+    if args.peft == "sparseLora":
         apply_liger_kernel_to_llama(
             rope=True,
             swiglu=False,
@@ -116,16 +117,18 @@ def main():
     train_dataset = load_dataset("json", data_files=args.dataset)["train"]
     train_dataset = train_dataset.map(partial(tokenize_and_mask, tokenizer, args.max_seq_length))
 
+    data_collator = transformers.DataCollatorForSeq2Seq(
+        tokenizer,
+        pad_to_multiple_of=args.max_seq_length,
+        return_tensors="pt",
+        padding=True,
+    )
+
     trainer = transformers.Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        data_collator=transformers.DataCollatorForSeq2Seq(
-            tokenizer,
-            pad_to_multiple_of=args.max_seq_length,
-            return_tensors="pt",
-            padding=True,
-        ),
+        data_collator=data_collator,
     )
     trainer.train()
     trainer.save_model()
@@ -139,7 +142,6 @@ def main():
                     "dataset": args.dataset,
                     "peft": args.peft,
                     "sparselora": args.sparselora,
-                    "use_liger": args.use_liger,
                     "max_seq_length": args.max_seq_length,
                     "lora_r": args.lora_r,
                     "lora_alpha": args.lora_alpha,
